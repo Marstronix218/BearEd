@@ -2,7 +2,11 @@
 
 Generate an AI-presented slide deck (text-to-speech + auto slides), lip-sync that narration to a face video with Wav2Lip, and view the result in a simple web UI: video on the left, slides on the right.
 
-## What’s inside
+## Demo
+
+https://github.com/user-attachments/assets/06e9f5ff-e452-497d-81df-0482c0e39932 
+
+## What's inside
 
 - `slide_audio_gen/` — creates a transcript from a topic using OpenAI, renders slide images from slide titles, synthesizes narration audio, and produces `presentation.mp4` (slides + audio). Requires your OpenAI API key.
 - `Wav2Lip-master/` — open-source lip-sync engine. You provide the face video and the narration audio; it outputs a lip-synced video.
