@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+
+# Node
+node_modules/
+
+# Model weights and large binaries
+*.pth
+*.pt
+*.onnx
+
+# Project artifacts
+results/**
+!results/.gitkeep
+
+# Slide/audio generator intermediates
+slide_audio_gen/audio/
+slide_audio_gen/slides/
+slide_audio_gen/video/
+slide_audio_gen/presentation.mp4
+slide_audio_gen/config.json
+
+# Wav2Lip intermediates
+Wav2Lip-master/temp/
+Wav2Lip-master/results/
+
+# Logs
+*.log

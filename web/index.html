@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BearEd — Lip-sync + Slides</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>BearEd</h1>
+      <p id="topic"></p>
+    </header>
+
+    <main class="split">
+      <section class="left">
+        <h2>Lip-synced Video</h2>
+        <video id="video" controls playsinline></video>
+      </section>
+      <section class="right">
+        <h2>Slides</h2>
+        <div class="slides">
+          <div class="viewer">
+            <img id="slide-view" alt="Slide" />
+          </div>
+          <div class="controls">
+            <button id="prev">Prev</button>
+            <span id="counter">0 / 0</span>
+            <button id="next">Next</button>
+          </div>
+          <div id="thumbs" class="thumbs"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <small>Serving latest run from <code>results/latest/manifest.json</code></small>
+    </footer>
+
+    <script src="./app.js"></script>
+  </body>
+  </html>
