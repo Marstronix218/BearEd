@@ -25,7 +25,7 @@ AUDIO_DIR = os.path.join(HERE, 'audio')
 MERGED_DIR = os.path.join(AUDIO_DIR, 'merged')
 SLIDE_DIR = os.path.join(HERE, 'slides')
 VIDEO_DIR = os.path.join(HERE, 'video')
-FONT_PATH = os.path.join(HERE, 'fonts', 'times new roman bold.ttf')
+FONT_PATH = os.path.join(HERE, 'fonts', 'Tinos-Bold.ttf')  # SIL OFL 1.1
 PRESENTATION_PATH = os.path.join(HERE, 'presentation.mp4')
 TIMINGS_PATH = os.path.join(HERE, 'timings.json')
 

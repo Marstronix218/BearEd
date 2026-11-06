@@ -1,146 +1,185 @@
 # BearEd
 
-Generate an AI-presented slide deck (text-to-speech + auto slides), lip-sync that narration to a face video with Wav2Lip, and view the result in a simple web UI: video on the left, slides on the right.
+Turn a topic into a narrated, AI-presented lesson video. BearEd writes the script with OpenAI, renders slides, reads them aloud with text-to-speech, lip-syncs the narration onto a presenter's face with Wav2Lip, and plays it all back in a web app with the slides kept in sync with the presenter. Every presentation can be downloaded as a single MP4.
 
 ## Demo
 
 https://github.com/user-attachments/assets/cdc64c60-b2e6-483d-a4a5-f6591fa63e10
- 
 
-## What's inside
+## Features
 
-- `slide_audio_gen/` — creates a transcript from a topic using OpenAI, renders slide images from slide titles, synthesizes narration audio, and produces `presentation.mp4` (slides + audio). Requires your OpenAI API key.
-- `Wav2Lip-master/` — open-source lip-sync engine. You provide the face video and the narration audio; it outputs a lip-synced video.
-- `pipeline.py` — glue script that runs slide generation, then Wav2Lip, and prepares `results/` with a manifest for the web UI.
-- `web/` — a tiny static site that reads `results/latest/manifest.json` and shows the lip-synced video alongside the slides.
-- `results/` — output artifacts per run (gitignored). `results/latest/` always points to the most recent run.
+- **Topic → presentation:** give a topic, optional details on what to cover, and a target length (1–8 minutes).
+- **Any presenter:** upload a front-facing photo or a short video of a face; it is lip-synced to the narration.
+- **Two narrator voices:** female or male.
+- **Synced viewer:** the slides follow the video, and clicking a slide jumps the video to it. The script for the current slide is shown under the presenter.
+- **MP4 export:** one 1280×720 video with the slide on the left and the presenter on the right.
+- **No manual model downloads:** model weights are fetched and checksum-verified on first run.
 
-## Prerequisites
+## Requirements
 
-- macOS (tested) with Python 3.9+ and ffmpeg installed
-- An OpenAI API key (for slide & transcript generation)
+- Python 3.11 (tested; 3.9–3.12 should work)
+- [ffmpeg](https://ffmpeg.org/) on your `PATH` (`brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Ubuntu)
+- An [OpenAI API key](https://platform.openai.com/api-keys). Each presentation makes one chat completion call (default model `gpt-4o-mini`), which costs a fraction of a cent.
+- About 4 GB of free disk space (1.6 GB of Python packages plus 1.7 GB of models)
 
-Install ffmpeg (one-time):
+Tested on macOS on Apple silicon, running on the CPU. Linux should work too, and Wav2Lip uses an NVIDIA GPU automatically if one is available.
 
-```bash
-brew install ffmpeg
-```
-
-## Setup
-
-1) Create the virtual environment and install everything (Python 3.11 tested)
+## Quick start
 
 ```bash
+git clone https://github.com/Marstronix218/BearEd.git
+cd BearEd
+
+# 1. Python environment
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r slide_audio_gen/requirements.txt -r Wav2Lip-master/requirements-modern.txt
-```
 
-(The upstream `Wav2Lip-master/requirements.txt` pins torch 1.1 / Python 3.6 and will not install; the bundled Wav2Lip code is patched for librosa ≥ 0.10 and torch ≥ 2.6.)
-
-2) Create your `.env` (gitignored) and fill it in
-
-```bash
+# 2. Configuration: put your OpenAI key in .env
 cp .env.example .env
+#    then edit .env and set OPENAI_API_KEY=sk-...
+
+# 3. Start the app
+python serve.py 8000
+#    open http://localhost:8000/web/
 ```
 
-| Variable | What |
-|---|---|
-| `OPENAI_API_KEY` | OpenAI key for transcript + slide generation |
-| `OPENAI_MODEL` | Chat model (default `gpt-4o-mini`) |
-| `WAV2LIP_CHECKPOINT` | Path to `wav2lip.pth` or `wav2lip_gan.pth` |
-| `FACE_VIDEO` | Talking-head clip or photo of the presenter (e.g. `assets/face.mp4`; `assets/` is gitignored) |
-| `WAV2LIP_ARGS` | Extra Wav2Lip flags (default `--resize_factor 2`) |
+The first generation downloads about 1.7 GB of models:
+- the Wav2Lip lip-sync model (436 MB)
+- the face detector (90 MB)
+- the SpeechT5 text-to-speech model and vocoder (about 1.1 GB, from Hugging Face)
 
-3) Model weights download automatically
+Later runs reuse them.
 
-On the first lip-sync run, `wav2lip_gan.pth` (436 MB) and the `s3fd.pth` face detector (90 MB) are fetched from a pinned revision of the `camenduru/Wav2Lip` Hugging Face mirror and verified by SHA-256 (see `weights.py`; run `python weights.py` to pre-fetch). They are loaded with `torch.load(weights_only=True)`. The text-to-speech model downloads automatically too; the narrator voices (female, male) are bundled in `slide_audio_gen/voices/`.
+## Using the web app
 
-## Use the web app (recommended)
+1. Expand **Create a presentation**.
+2. Enter a **Topic**, for example *Introduction to Graph Algorithms*.
+3. Optionally add **Details**, for example *focus on BFS vs DFS with a maze example; skip the math proofs*.
+4. Choose a **Video length** and a **Voice**.
+5. Upload a **Presenter face**: a clear, front-facing photo (JPG/PNG) or a few seconds of video (MP4/MOV/WebM), up to 200 MB. Videos are looped to match the narration length.
+6. Click **Generate**. Progress and a live log appear under the form.
 
-```bash
-source .venv/bin/activate
-python serve.py 8000        # open http://localhost:8000/web/
-```
+When it finishes, the new presentation loads automatically.
+- Play the video and the slides follow it.
+- Click a thumbnail, use **Prev**/**Next**, or press ←/→ to jump.
+- Click **Download MP4** to save the export.
 
-In **Create a presentation**, enter a topic, optionally describe what it should cover (**Details**), pick a **Video length** (1–8 min) and **Voice** (female/male), upload a face photo or short video, and click **Generate**. Progress and logs show in the page; when it finishes the new presentation loads automatically and **Download MP4** saves a single 1280×720 video (slide on the left, talking presenter on the right). Tick *Reuse the last narration* to redo only the face (no OpenAI call). One generation runs at a time; the server listens on localhost only.
+To try a different face without rewriting the script, tick **Reuse the last narration**. That skips OpenAI and text-to-speech and only redoes the lip-sync.
 
-Rough timing on an Apple-silicon CPU: ~90 s for a 1-minute video, ~5 min for 3 minutes. The face input is shrunk to fit 720 px before lip-sync.
+Rough timings on an Apple-silicon CPU: about 1.5 minutes for a 1-minute video, and about 5 minutes for a 3-minute video. Lip-sync is the slow step. Target lengths are approximate (±15%) because the script writer doesn't hit word counts exactly.
 
-## Run the pipeline from the command line
+> The server listens on `127.0.0.1` only and runs one generation at a time. It is meant for local use, not for exposing to the internet.
 
-Provide a face video (any single-person talking head clip; the face should be clearly visible) and a topic. The pipeline will:
+## Command line
 
-- Generate a transcript and slides for the topic
-- Synthesize narration audio and build `presentation.mp4`
-- Run Wav2Lip to lip-sync the narration to your face video
-- Prepare `results/<run>/` and mirror it to `results/latest/`
+The web app runs `pipeline.py`, which you can also call directly:
 
 ```bash
 python pipeline.py --topic "Introduction to Graph Algorithms" \
-  --details "Focus on BFS vs DFS with a maze example" --minutes 3
-# --face / --checkpoint override the .env values if given
+  --details "Focus on BFS vs DFS with a maze example" \
+  --minutes 3 --voice male --face path/to/face.jpg
 ```
 
-Useful flags:
+| Flag | Meaning |
+|---|---|
+| `--topic` | Presentation topic (required) |
+| `--details` | What the presentation should specifically cover |
+| `--minutes` | Target length in minutes (default 3) |
+| `--voice` | `female` (default) or `male` |
+| `--face` | Face photo or video (default: `FACE_VIDEO` from `.env`) |
+| `--checkpoint` | Custom Wav2Lip checkpoint (default: auto-downloaded `wav2lip_gan.pth`) |
+| `--run-name` | Output folder name under `results/` (default: timestamp) |
+| `--skip-slides` | Reuse the last script, slides and narration (no OpenAI call) |
+| `--skip-lipsync` | Skip Wav2Lip; no face needed. Useful for testing the rest of the pipeline |
+| `--w2l-args` | Extra Wav2Lip flags, e.g. `"--pads 0 20 0 0 --nosmooth"` |
 
-- `--skip-lipsync` — no Wav2Lip needed (no checkpoint/face video); the UI plays the slides+narration video. Good for testing the rest of the pipeline.
-- `--skip-slides` — reuse the last slide/narration output (skip OpenAI + TTS), e.g. to retry Wav2Lip with different settings.
-- `--w2l-args "--pads 0 20 0 0 --resize_factor 2 --nosmooth"` — pass extra flags to Wav2Lip.
+Before doing any work, the pipeline checks that ffmpeg is installed, the OpenAI key is set and the face file exists. The model weights are downloaded if they are missing.
 
-The pipeline runs a preflight check (ffmpeg, OpenAI key, face video, checkpoint, `s3fd.pth`) before doing any work.
+To fetch the weights ahead of time, run `python weights.py`.
 
-Outputs are written to:
+## Configuration (`.env`)
 
-- `results/<timestamp>/presentation_final.mp4` — the shareable export (slides + presenter, 1280×720)
-- `results/<timestamp>/lipsynced.mp4` — lip-synced talking-head video
-- `results/<timestamp>/slides/` — generated slide images
-- `results/<timestamp>/presentation_audio.mp4` — the slides-with-audio reference
-- `results/<timestamp>/manifest.json` — consumed by the web UI; each slide has `start`/`end` times (seconds) in the narration, taken from `slide_audio_gen/timings.json`
-- `results/latest/` — a copy of the most recent run for convenience
+| Variable | Purpose | Default |
+|---|---|---|
+| `OPENAI_API_KEY` | OpenAI key used to write the script | (required) |
+| `OPENAI_MODEL` | Chat model | `gpt-4o-mini` |
+| `WAV2LIP_CHECKPOINT` | Wav2Lip checkpoint path; downloaded automatically if it is the default path | `Wav2Lip-master/checkpoints/wav2lip_gan.pth` |
+| `FACE_VIDEO` | Default face for command-line runs (the web app uses the uploaded face) | `assets/face.mp4` |
+| `WAV2LIP_ARGS` | Extra Wav2Lip flags for every run | (empty) |
 
-Note: The slide generator downloads a TTS model the first time and calls OpenAI’s API; the first run can take several minutes.
+`.env`, `assets/` and `uploads/` are gitignored. Never commit your API key.
 
-## View in the web UI
-
-```bash
-# from repo root
-python serve.py 8000
-# then open http://localhost:8000/web/
-```
-
-Use `serve.py` rather than `python -m http.server`: the latter does not support HTTP Range requests, so the browser cannot seek in the video.
-
-The page loads `results/latest/manifest.json`, shows the lip-synced video on the left and the slides on the right. The slides follow the video as it plays. Clicking a thumbnail, Prev/Next, or the ←/→ keys jumps the video to that slide. The narration for the current slide is shown under it.
-
-## Tips and notes
-
-- Face video quality: Clear, front-facing videos work best. Tweak Wav2Lip with `--w2l-args`.
-- Keeping artifacts: `pipeline.py` sets `KEEP_SLIDES=1` so slides survive cleanup; each new run clears the previous run's intermediates first.
-- Checkpoints: Don’t commit `.pth` files to git (they’re large and licensed separately). Store them locally.
-- Reproducibility: Different OpenAI generations will yield different slide content. Re-run with the same topic to regenerate.
-
-## Repository structure
+## How it works
 
 ```
-slide_audio_gen/         # slide + audio generation (OpenAI + TTS + ffmpeg)
-Wav2Lip-master/          # upstream Wav2Lip (open-source)
-web/                     # simple static web viewer
-results/                 # run artifacts (gitignored, .gitkeep only)
-pipeline.py              # orchestrates end-to-end flow
-serve.py                 # web app: viewer + upload/generate API
-weights.py               # auto-download + checksum of model weights
+topic + details + length + voice
+  │
+  ├─ 1. slide_audio_gen/main.py
+  │     • OpenAI writes the script as JSON (title + narration per slide)
+  │     • slide images are rendered (Pillow)
+  │     • narration is synthesized sentence by sentence (SpeechT5)
+  │     • per-slide clips are joined into presentation.mp4 (ffmpeg)
+  │       and the start/end time of each slide goes to timings.json
+  │
+  ├─ 2. Wav2Lip: the face is shrunk to ≤720 px and lip-synced to the narration
+  │
+  ├─ 3. Export: slides | presenter, composited into a 1280×720 MP4 (ffmpeg)
+  │
+  └─ 4. results/<run>/ is written and copied to results/latest/ for the web app
+```
+
+Each run writes these to `results/<run>/`:
+
+| File | Contents |
+|---|---|
+| `presentation_final.mp4` | The shareable export (slides + presenter) |
+| `lipsynced.mp4` | The talking-presenter video |
+| `presentation_audio.mp4` | Slides with narration, no presenter |
+| `slides/` | Slide images |
+| `manifest.json` | Topic, settings, and per-slide title, narration and `start`/`end` times, read by the web app |
+
+## Project structure
+
+```
+serve.py                 web app server: static files + upload/generate API
+pipeline.py              runs the steps above end to end
+weights.py               downloads and verifies the Wav2Lip and face-detector weights
+web/                     viewer and "Create a presentation" UI (plain HTML/CSS/JS)
+slide_audio_gen/
+  main.py                script, slides, narration, presentation.mp4, timings.json
+  voices/                narrator voice embeddings (female.npy, male.npy)
+  fonts/                 slide font (Tinos, SIL OFL)
+Wav2Lip-master/          Wav2Lip (third-party, lightly patched; see License)
+.env.example             configuration template
+results/                 generated presentations (gitignored)
+LICENSE                  MIT license for BearEd's own code
 ```
 
 ## Troubleshooting
 
-- Module import errors (PyTorch/Transformers): Ensure your virtualenv is active and dependencies are installed. Apple Silicon users may prefer conda-forge PyTorch builds.
-- ffmpeg not found: Install via Homebrew (`brew install ffmpeg`).
-- "Face not detected": use a clip where the face is clearly visible and front-facing in every frame.
-- Face not detected in some frames: Try `--w2l-args "--pads 0 20 0 0 --nosmooth"`.
-- Wav2Lip is slow on CPU: try `--w2l-args "--resize_factor 2"` and a short face clip (it is looped to the narration length).
+| Problem | Fix |
+|---|---|
+| `Preflight failed: OpenAI key missing` | Set `OPENAI_API_KEY` in `.env`. |
+| `OpenAI API error 401/429` | Check the key, and check that the OpenAI account has credit. |
+| `Face not detected!` | Use a photo or video where one face is clearly visible and front-facing in every frame. |
+| Mouth area looks off or cropped | Try `--w2l-args "--pads 0 20 0 0"`. For jittery video, add `--nosmooth`. |
+| `ffmpeg not found` | Install ffmpeg and make sure it is on your `PATH`. |
+| Video won't seek in the browser | Open the app through `python serve.py`, not `python -m http.server` (which lacks HTTP Range support). |
+| `A generation is already running` | Wait for the current job to finish; its progress is shown in the form. |
 
 ## License
 
-- Your code in `slide_audio_gen/`, `web/`, and `pipeline.py` is your project code.
-- `Wav2Lip-master/` is from the original authors and restricted to research/personal/non-commercial use. See its README for details. Do not use it commercially.
+BearEd's own code is released under the [MIT License](LICENSE). It also bundles and downloads third-party components that keep their own licenses, listed below. The MIT License does not apply to them. **Wav2Lip is licensed for non-commercial use only, so a setup that includes it, as BearEd does by default, may not be used commercially.**
+
+| Component | License / terms |
+|---|---|
+| BearEd's own code: everything outside `Wav2Lip-master/` except the items below | [MIT](LICENSE) |
+| [Wav2Lip](https://github.com/Rudrabha/Wav2Lip) code and model weights (`Wav2Lip-master/`, `wav2lip_gan.pth`) | **Personal, research and non-commercial use only.** The models were trained on the LRS2 dataset, and any commercial use is prohibited. See `Wav2Lip-master/README.md`; commercial requests go to the Wav2Lip authors. |
+| S3FD face detector (`s3fd.pth`, from [face-alignment](https://github.com/1adrianb/face-alignment)) | BSD 3-Clause |
+| [SpeechT5 TTS](https://huggingface.co/microsoft/speecht5_tts) and [HiFi-GAN vocoder](https://huggingface.co/microsoft/speecht5_hifigan) | MIT |
+| Narrator voices (`slide_audio_gen/voices/`) | Speaker embeddings derived from the [CMU ARCTIC](http://festvox.org/cmu_arctic/) speakers `slt` and `bdl`, via [Matthijs/cmu-arctic-xvectors](https://huggingface.co/datasets/Matthijs/cmu-arctic-xvectors). CMU ARCTIC is distributed under a permissive BSD-style license. |
+| Slide font [Tinos](https://fonts.google.com/specimen/Tinos) (`slide_audio_gen/fonts/Tinos-Bold.ttf`) | SIL Open Font License 1.1 (`slide_audio_gen/fonts/OFL-Tinos.txt`) |
+| Generated scripts | Produced with the OpenAI API, subject to [OpenAI's terms](https://openai.com/policies/terms-of-use). |
+
+**Responsible use:** only upload faces you have permission to use. Don't use BearEd to impersonate real people or to make deceptive content, and make it clear to viewers that the presenter is AI-generated.
