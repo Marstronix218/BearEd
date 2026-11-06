@@ -1,0 +1,9 @@
+# Inference-only deps that install on Python 3.9-3.12 (the pinned
+# requirements.txt targets Python 3.6 / torch 1.1 and will not install).
+torch
+numpy
+opencv-python
+librosa>=0.9
+scipy
+tqdm
+numba

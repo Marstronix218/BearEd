@@ -1,5 +1,6 @@
-*.json
-*.txt
+config.json
+timings.json
+presentation.mp4
 /venv
 /audio
 /slides

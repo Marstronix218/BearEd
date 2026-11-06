@@ -53,7 +53,7 @@ parser.add_argument('--nosmooth', default=False, action='store_true',
 args = parser.parse_args()
 args.img_size = 96
 
-if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+if os.path.isfile(args.face) and os.path.splitext(args.face)[1].lower() in ['.jpg', '.png', '.jpeg']:
 	args.static = True
 
 def get_smoothened_boxes(boxes, T):
@@ -159,10 +159,11 @@ print('Using {} for inference.'.format(device))
 
 def _load(checkpoint_path):
 	if device == 'cuda':
-		checkpoint = torch.load(checkpoint_path)
+		checkpoint = torch.load(checkpoint_path, weights_only=True)
 	else:
 		checkpoint = torch.load(checkpoint_path,
-								map_location=lambda storage, loc: storage)
+								map_location=lambda storage, loc: storage,
+								weights_only=True)
 	return checkpoint
 
 def load_model(path):
@@ -182,7 +183,7 @@ def main():
 	if not os.path.isfile(args.face):
 		raise ValueError('--face argument must be a valid path to video/image file')
 
-	elif args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+	elif os.path.splitext(args.face)[1].lower() in ['.jpg', '.png', '.jpeg']:
 		full_frames = [cv2.imread(args.face)]
 		fps = args.fps
 

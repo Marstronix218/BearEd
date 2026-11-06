@@ -8,17 +8,58 @@
   </head>
   <body>
     <header>
-      <h1>BearEd</h1>
-      <p id="topic"></p>
+      <div>
+        <h1>BearEd</h1>
+        <p id="topic"></p>
+      </div>
+      <a id="download" class="download" hidden download>Download MP4</a>
     </header>
 
+    <details class="create" id="create" open>
+      <summary><h2>Create a presentation</h2></summary>
+      <form id="gen-form">
+        <label class="f-topic"><span>Topic</span>
+          <input id="gen-topic" type="text" maxlength="200" required
+                 placeholder="e.g. Introduction to Graph Algorithms" />
+        </label>
+        <label class="f-len"><span>Video length</span>
+          <select id="gen-minutes">
+            <option value="1">~1 minute</option>
+            <option value="2">~2 minutes</option>
+            <option value="3" selected>~3 minutes</option>
+            <option value="5">~5 minutes</option>
+            <option value="8">~8 minutes</option>
+          </select>
+        </label>
+        <label class="f-voice"><span>Voice</span>
+          <select id="gen-voice">
+            <option value="female">Female</option>
+            <option value="male">Male</option>
+          </select>
+        </label>
+        <label class="f-details"><span>Details <span class="opt">(optional)</span></span>
+          <textarea id="gen-details" rows="2" maxlength="2000"
+                    placeholder="What should it cover? e.g. focus on BFS vs DFS with a maze example, explain Dijkstra step by step, skip the math proofs"></textarea>
+        </label>
+        <label class="f-face"><span>Presenter face</span>
+          <input id="gen-face" type="file" required
+                 accept="video/mp4,video/quicktime,video/webm,image/jpeg,image/png" />
+          <small>A clear, front-facing photo or a few seconds of video.</small>
+        </label>
+        <label class="check f-reuse">
+          <input id="gen-reuse" type="checkbox" />
+          Reuse the last narration (only redo the face; topic, details, length and voice are ignored)
+        </label>
+        <button id="gen-btn" class="f-btn" type="submit">Generate</button>
+      </form>
+      <div id="gen-status" class="gen-status" hidden>
+        <div class="gen-row"><span id="gen-spinner" class="spinner"></span><span id="gen-step"></span><span id="gen-time" class="muted"></span></div>
+        <details><summary>Log</summary><pre id="gen-log"></pre></details>
+      </div>
+    </details>
+
     <main class="split">
-      <section class="left">
-        <h2>Lip-synced Video</h2>
-        <video id="video" controls playsinline></video>
-      </section>
-      <section class="right">
-        <h2>Slides</h2>
+      <section class="slides-col">
         <div class="slides">
           <div class="viewer">
             <img id="slide-view" alt="Slide" />
@@ -27,9 +68,14 @@
             <button id="prev">Prev</button>
             <span id="counter">0 / 0</span>
             <button id="next">Next</button>
+            <span id="sync" class="badge"></span>
           </div>
           <div id="thumbs" class="thumbs"></div>
         </div>
+      </section>
+      <section class="presenter-col">
+        <video id="video" controls playsinline></video>
+        <p id="caption" class="caption"></p>
       </section>
     </main>
 
@@ -39,4 +85,4 @@
 
     <script src="./app.js"></script>
   </body>
-  </html>
+</html>

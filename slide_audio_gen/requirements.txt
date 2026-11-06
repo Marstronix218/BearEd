@@ -1,0 +1,8 @@
+requests
+pillow
+numpy
+soundfile
+torch
+transformers
+sentencepiece
+datasets

@@ -1,418 +1,356 @@
-import os
-import sys
-from transformers import pipeline
-from datasets import load_dataset
-import soundfile as sf
-import torch
-import numpy as np
-import requests
+"""Generate a narrated slide presentation for a topic.
+
+Steps: OpenAI script (JSON, one call) -> slide images -> TTS audio per slide
+-> per-slide videos -> presentation.mp4, plus timings.json describing when
+each slide starts/ends in the narration (used by the web UI to sync slides
+with the lip-synced video).
+
+Usage: python main.py "<topic>" [--details "..."] [--minutes 3] [--voice male]
+Env:   OPENAI_API_KEY (repo-root .env, env var, or config.json), OPENAI_MODEL (default gpt-4o-mini),
+       KEEP_SLIDES=1 to keep slide images after cleanup.
+"""
 import json
+import os
 import re
-from PIL import Image, ImageDraw, ImageFont
+import shutil
+import subprocess
+import sys
 import wave
 
-print('initializing..')
-AUDIO_PATH = '/audio/'
-SLIDE_PATH = '/slides/'
-GAIN_FACTOR = 3
-# first argument is the txt file with the transcript
-topic = sys.argv[1]
+import requests
+from PIL import Image, ImageDraw, ImageFont
 
-# audio synthesis
-synthesiser = pipeline("text-to-speech", "microsoft/speecht5_tts")
-
-embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation")
-speaker_embedding = torch.tensor(embeddings_dataset[7306]["xvector"]).unsqueeze(0)
-
-
-# get the open AI API key by reading config.json
-with open('config.json', 'r') as file:
-    config = json.load(file)
-
-OPENAI_API_KEY = config['OPENAI_API_KEY']
+HERE = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(HERE, 'audio')
+MERGED_DIR = os.path.join(AUDIO_DIR, 'merged')
+SLIDE_DIR = os.path.join(HERE, 'slides')
+VIDEO_DIR = os.path.join(HERE, 'video')
+FONT_PATH = os.path.join(HERE, 'fonts', 'times new roman bold.ttf')
+PRESENTATION_PATH = os.path.join(HERE, 'presentation.mp4')
+TIMINGS_PATH = os.path.join(HERE, 'timings.json')
 
 
-def speak(text, filename):
-    GAIN_FACTOR = 3  # Adjust this value to increase or decrease the volume
-    current_path = os.getcwd()
-    file_path = current_path + AUDIO_PATH + filename
+def load_dotenv(path):
+    """Minimal .env loader (KEY=VALUE lines); real env vars take priority."""
+    if not os.path.isfile(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, val = line.split('=', 1)
+            val = val.strip().strip('"').strip("'")
+            os.environ.setdefault(key.strip(), val)
 
-    # check audio folder
-    if not os.path.exists(current_path + AUDIO_PATH):
-        os.makedirs(current_path + AUDIO_PATH)
 
-    # cut text into sentences
-    text_pieces = []
+load_dotenv(os.path.join(os.path.dirname(HERE), '.env'))
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
 
-    # find number of sentences
-    num_sentences = len(re.findall(r'[.!?]', text))
-    while len(text) > 0:
-        # look for . or ? or ! to cut the text
-        next_dot = text.find(".")
-        next_question = text.find("?")
-        next_exclamation = text.find("!")
-        
-        endings = []
-        for end in [next_dot, next_question, next_exclamation]:
-            if end != -1:
-                endings.append(end)
-        
-        if len(endings) == 0:
-            # no more sentence endings, add the rest of the text
-            text_pieces.append(text)
-            break
-        
-        end = min(endings)+1
+SLIDE_WIDTH, SLIDE_HEIGHT = 800, 600
+FONT_SIZE = 60
+OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
 
-        # get the sentence
-        sentence = text[:end].strip()
 
-        # remove the sentence from the text
-        text = text[end:]
+def natural_key(s):
+    """Sort 'slide2' before 'slide10' and 'part_2' before 'part_10'."""
+    return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)]
 
-        text_pieces.append(sentence)
 
-        
+def load_api_key():
+    key = os.getenv('OPENAI_API_KEY')
+    if key and not key.startswith('sk-your'):
+        return key
+    cfg = os.path.join(HERE, 'config.json')
+    if os.path.exists(cfg):
+        with open(cfg) as f:
+            key = json.load(f).get('OPENAI_API_KEY')
+    if not key or key.startswith('sk-your'):
+        sys.exit('OpenAI API key missing: set OPENAI_API_KEY or fill '
+                 'slide_audio_gen/config.json (see config.example.json).')
+    return key
 
-    
-    
-    for i, piece in enumerate(text_pieces):
-        
-        # print the progress
-        print(f'Processing sentence {i+1}/{num_sentences}', end='\r')
 
-        speech = synthesiser(piece, forward_params={"speaker_embeddings": speaker_embedding})
-        increased_volume_audio = np.clip(speech["audio"] * GAIN_FACTOR, -1.0, 1.0)
-        sf.write(file_path + "_part_" + str(i) + ".wav", increased_volume_audio, samplerate=speech["sampling_rate"])
+def chat(messages, json_mode=False):
+    data = {'model': OPENAI_MODEL, 'messages': messages}
+    if json_mode:
+        data['response_format'] = {'type': 'json_object'}
+    resp = requests.post(
+        OPENAI_ENDPOINT, json=data, timeout=180,
+        headers={'Authorization': 'Bearer ' + load_api_key()},
+    )
+    if resp.status_code != 200:
+        sys.exit(f'OpenAI API error {resp.status_code}: {resp.text[:500]}')
+    return resp.json()['choices'][0]['message']['content']
 
-def get_JSON_from_transcript(transcript):
-    print('Using OpenAI to convert the transcript to a JSON format...')
-    prompt = """
-You are an experienced programmer and presenter. You have the following transcript to present. 
-make sure to change abbreviations to full words. Dont use any punctuation.
-Convert them into JSON with the following format:
-{
-slides:[
-    { 
-    slide: 1,
-    line: <Things to say>,
-    title: <summary of things to say in 5 words at most>
-    },
-    {
-    slide: <slide number>,
-    line: <Things to say>,
-    title: <summary of things to say in 5 words at most>
-    }
-]
-}
 
-Here is the transcript
+# measured SpeechT5 speaking rates (words/min); the male voice is faster
+WORDS_PER_MINUTE = {'female': 165, 'male': 195}
 
+
+def plan_length(minutes, voice='female'):
+    """Slide count and words per slide for a target video length."""
+    total_words = int(minutes * WORDS_PER_MINUTE.get(voice, 165))
+    n_slides = max(2, min(12, round(minutes * 1.5) + 1))
+    return n_slides, max(25, total_words // n_slides)
+
+
+def generate_slides_json(topic, details='', minutes=3.0, voice='female'):
+    """One OpenAI call -> {"slides": [{"slide", "title", "line"}]}."""
+    n_slides, words = plan_length(minutes, voice)
+    print(f'Planning {n_slides} slides x ~{words} words '
+          f'(~{minutes:g} min of narration)...')
+    focus = (f'\nThe presenter wants it to cover specifically:\n{details}\n'
+             if details.strip() else '')
+    prompt = f"""
+You are an experienced teacher and presenter writing the spoken script for a
+presentation about: {topic}
+{focus}
+Audience: high school students. Be clear and engaging; rhetorical questions
+and light humor are welcome. The script is read aloud by a text-to-speech
+engine, so:
+- write numbers, symbols and abbreviations out as full words
+- no markdown, bullet points, emojis or stage directions
+- use normal sentence punctuation (. ? !)
+
+Write exactly {n_slides} slides. Each slide's spoken text must be about
+{words} words (this controls the video length, so stick to it closely).
+
+Return JSON only, in this exact format:
+{{"slides": [{{"slide": 1, "title": "<slide title, 5 words at most>",
+"line": "<what the presenter says on this slide>"}}]}}
 """
-
-    endpoint =  "https://api.openai.com/v1/chat/completions"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + OPENAI_API_KEY,
-    }
-
-    data = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {
-                "role": "system",
-                "content": prompt
-            },
-            {
-                "role": "user",
-                "content": transcript
-            }
-        ]
-    }
-
-    response = requests.post(endpoint, json=data, headers=headers)
-    response_data = response.json()
-    slides_JSON = response_data['choices'][0]['message']['content']
-    slides_JSON = json.loads(slides_JSON)
-
+    content = chat([{'role': 'user', 'content': prompt}], json_mode=True)
+    slides_JSON = json.loads(content)
+    if not slides_JSON.get('slides'):
+        sys.exit(f'OpenAI returned no slides: {content[:500]}')
+    # renumber 1..N so filenames are always consistent
+    for i, s in enumerate(slides_JSON['slides'], start=1):
+        s['slide'] = i
+    total = sum(len(s['line'].split()) for s in slides_JSON['slides'])
+    print(f'Got {len(slides_JSON["slides"])} slides, {total} words '
+          f'(~{total / WORDS_PER_MINUTE.get(voice, 165):.1f} min)')
     return slides_JSON
 
-def covert_trascript_to_audio(slides_JSON):
-    print('Transcript converted to JSON, starting to convert to audio...')
-    for slide in slides_JSON['slides']:
-        mytext = slide['line']
-        print('Converting slide ' + str(slide['slide']) + ' to audio...')
-        speak(mytext, "slide" + str(slide['slide']))
 
-    print("All slides have been converted to audio")
+def split_sentences(text):
+    pieces = [p.strip() for p in re.split(r'(?<=[.!?])\s+', text.strip())]
+    return [p for p in pieces if p]
+
+
+def speak(synthesiser, speaker_embedding, text, slide_num):
+    import numpy as np
+    import soundfile as sf
+
+    pieces = split_sentences(text)
+    for i, piece in enumerate(pieces):
+        print(f'  sentence {i + 1}/{len(pieces)}', end='\r')
+        speech = synthesiser(
+            piece, forward_params={'speaker_embeddings': speaker_embedding})
+        audio = np.asarray(speech['audio'], dtype=np.float32).squeeze()
+        peak = float(np.abs(audio).max()) or 1.0
+        audio = audio * (0.9 / peak)  # loud but without clipping
+        sf.write(os.path.join(AUDIO_DIR, f'slide{slide_num}_part_{i}.wav'),
+                 audio, samplerate=speech['sampling_rate'], subtype='PCM_16')
+    print()
+
+
+VOICES_DIR = os.path.join(HERE, 'voices')
+
+
+def available_voices():
+    return sorted(f[:-4] for f in os.listdir(VOICES_DIR) if f.endswith('.npy'))
+
+
+def convert_transcript_to_audio(slides_JSON, voice='female'):
+    print('Loading text-to-speech model...')
+    import torch
+    from transformers import pipeline
+
+    synthesiser = pipeline('text-to-speech', 'microsoft/speecht5_tts')
+    # Speaker voice: a SpeechT5 x-vector stored in voices/<name>.npy
+    import numpy as np
+    xvec = np.load(os.path.join(VOICES_DIR, f'{voice}.npy'))
+    print(f'Voice: {voice}')
+    speaker_embedding = torch.tensor(xvec).unsqueeze(0)
+
+    for slide in slides_JSON['slides']:
+        print(f"Converting slide {slide['slide']} to audio...")
+        speak(synthesiser, speaker_embedding, slide['line'], slide['slide'])
+    print('All slides have been converted to audio')
+
+
+def wrap_text(draw, text, font, max_width):
+    lines, current = [], ''
+    for word in text.split():
+        trial = f'{current} {word}'.strip()
+        if draw.textlength(trial, font=font) <= max_width or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
 
 def generate_slides(slides_JSON):
-    """
-    using the title from the JSON, we will generate an image with that title
-    black text on white background
-    """
-    slide_path = os.getcwd() + SLIDE_PATH
-
-    if not os.path.exists(slide_path):
-        os.makedirs(slide_path)
-    
+    """Render each slide title as black text centred on a white slide."""
     print('Generating slides...')
+    margin = 40
+    max_w = SLIDE_WIDTH - 2 * margin
     for slide in slides_JSON['slides']:
-        title = slide['title']
-        slide_num = slide['slide']
-
-        FONT_SIZE = 60
-        SLIDE_HEIGHT = 600
-        SLIDE_WIDTH = 800
-
-        # create an image with the title
-        img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_WIDTH), color = 'white')
-
-        # draw big text in the middle
-        fnt = ImageFont.truetype('./fonts/times new roman bold.ttf', FONT_SIZE)
-        
+        img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_HEIGHT), color='white')
         d = ImageDraw.Draw(img)
-        
-
-        text_width, text_height = d.textlength(title, font=fnt), FONT_SIZE
-
-        # if the title is too long, cut it
-        cut_title = ""
-        if text_width > SLIDE_WIDTH:
-            while text_width > SLIDE_WIDTH:
-                # add last word to the cut_title
-                last_word = title.split()[-1]
-                title = title[:-len(last_word)]
-                cut_title = last_word + cut_title
-
-                text_width, text_height = d.textlength(title, font=fnt), FONT_SIZE
-        
-
-
-        d.text(((SLIDE_WIDTH - text_width)/2,(SLIDE_HEIGHT-text_height)/2), title, font=fnt, fill='black')
-        d.text(((SLIDE_WIDTH - text_width)/2,(SLIDE_HEIGHT+text_height)/2 +FONT_SIZE+10), cut_title, font=fnt, fill='black')
-        
-        img.save(slide_path+ 'slide_' + str(slide_num) + '.png')
-
+        size = FONT_SIZE
+        while True:  # shrink until every wrapped line fits
+            font = ImageFont.truetype(FONT_PATH, size)
+            lines = wrap_text(d, slide['title'], font, max_w)
+            if size <= 20 or all(
+                    d.textlength(ln, font=font) <= max_w for ln in lines):
+                break
+            size -= 4
+        line_h = size + 10
+        y = (SLIDE_HEIGHT - line_h * len(lines)) / 2
+        for line in lines:
+            w = d.textlength(line, font=font)
+            d.text(((SLIDE_WIDTH - w) / 2, y), line, font=font, fill='black')
+            y += line_h
+        img.save(os.path.join(SLIDE_DIR, f"slide_{slide['slide']}.png"))
     print('All slides have been generated')
 
-def generate_transcript(topic):
-    prompt = f"""
-You are an experienced programmer and presenter. You are giving a presentation about {topic}.
-You have to generate a transcript for the presentation. The transcript should be clear and concise.
-Assume your audience is highschool students.  
-Each slide must have at least 8 sentences. Make the presentation style engaging by asking rhetorical questions and using humor.
-If you use humor, keep it mind it will be read by a text-to-speech engine.
-it should be in the following format:
-
-Slide 1:
-<things to say>
-
-Slide 2:
-<things to say>
-
-Create at least 5 slides. but no more than 10 slides. and DO NOT USE ANY ABBREVIATIONS.
-"""
-
-    endpoint =  "https://api.openai.com/v1/chat/completions"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + OPENAI_API_KEY,
-    }
-
-    data = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    }
-
-    response = requests.post(endpoint, json=data, headers=headers)
-    response_data = response.json()
-    transcript = response_data['choices'][0]['message']['content']
-
-    return transcript
 
 def merge_audio_files():
-    """
-    merge all the audio files into one for each slide
-    """
+    """Concatenate sentence clips into one wav per slide; return durations."""
     print('Merging audio files...')
-    # get the audio files
-    audio_files = os.listdir(os.getcwd() + AUDIO_PATH)
-    audio_files = sorted(audio_files)
-
-    print(audio_files)
+    files = sorted((f for f in os.listdir(AUDIO_DIR) if f.endswith('.wav')),
+                   key=natural_key)
     slides = {}
-    for file in audio_files:
-        slide_name = file.split('_')[0]
+    for f in files:
+        slides.setdefault(f.split('_')[0], []).append(f)
 
-        if slide_name not in slides:
-            slides[slide_name] = []
-        
-        audio = wave.open(os.getcwd() + AUDIO_PATH + file, 'rb')
-        # get the audio data
-        audio_params = audio.getparams()
-        audio_data = audio.readframes(audio.getnframes())
-
-        slides[slide_name].append((audio_params,audio_data))
-        audio.close()
-    
-    # if merged folder does not exist, create it
-    if not os.path.exists(os.getcwd() + AUDIO_PATH + 'merged/'):
-        os.makedirs(os.getcwd() + AUDIO_PATH + 'merged/')
-
-    # create a new audio file for each slide
-    for slide in slides:
-        audio_data = slides[slide]
-        new_audio = wave.open(os.getcwd() + AUDIO_PATH +'merged/'+ slide + '.wav', 'wb')
-        
-        new_audio.setparams(audio_data[0][0])
-        for data in audio_data:
-            new_audio.writeframes(data[1])
-        
-        new_audio.close()
-
+    durations = {}
+    for slide_name, parts in slides.items():
+        out_path = os.path.join(MERGED_DIR, slide_name + '.wav')
+        with wave.open(out_path, 'wb') as out:
+            params = None
+            for part in parts:
+                with wave.open(os.path.join(AUDIO_DIR, part), 'rb') as w:
+                    if params is None:
+                        params = w.getparams()
+                        out.setparams(params)
+                    out.writeframes(w.readframes(w.getnframes()))
+        with wave.open(out_path, 'rb') as w:
+            durations[int(slide_name[len('slide'):])] = (
+                w.getnframes() / float(w.getframerate()))
     print('All audio files have been merged')
+    return durations
 
-def generate_video():
-    """
-    generate a video from the slides and audio
-    using the merged audio files, and slides, we can create a simple video
+
+def ffmpeg(*args):
+    cmd = ['ffmpeg', '-y', '-loglevel', 'error', *args]
+    if subprocess.run(cmd).returncode != 0:
+        sys.exit('ffmpeg failed: ' + ' '.join(cmd))
+
+
+def generate_video(slides_JSON, durations):
+    """Build one clip per slide (still image + narration) and concatenate.
+
+    Each clip is cut to the exact narration length with -t; `-shortest`
+    overshoots by ~1-2 s per clip with a looped image, which made slides
+    drift out of sync with the video.
     """
     print('Generating video...')
-    # get the audio files
-    audio_files = os.listdir(os.getcwd() + AUDIO_PATH + 'merged/')
-    audio_files = sorted(audio_files)
+    clips = []
+    for slide in slides_JSON['slides']:
+        n = slide['slide']
+        clip = os.path.join(VIDEO_DIR, f'slide_{n}.mp4')
+        dur = f'{durations[n]:.3f}'
+        ffmpeg('-loop', '1', '-i', os.path.join(SLIDE_DIR, f'slide_{n}.png'),
+               '-i', os.path.join(MERGED_DIR, f'slide{n}.wav'),
+               '-c:v', 'libx264', '-tune', 'stillimage', '-pix_fmt', 'yuv420p',
+               '-r', '25', '-c:a', 'aac', '-ar', '44100', '-ac', '1',
+               '-t', dur, clip)
+        clips.append(clip)
 
-    # get the slides
-    slide_files = os.listdir(os.getcwd() + SLIDE_PATH)
-    slide_files = sorted(slide_files)
-
-    # create video in the video folder
-    if not os.path.exists(os.getcwd() + '/video/'):
-        os.makedirs(os.getcwd() + '/video/')
-    
-    video_files = []
-    # create a video for each slide
-    for i, slide in enumerate(slide_files):
-        print(f'Creating video for slide {i+1}/{len(slide_files)}', end='\r')
-        slide_path = os.getcwd() + SLIDE_PATH + slide
-        audio_path = os.getcwd() + AUDIO_PATH + 'merged/' + audio_files[i]
-        video_path = os.getcwd() + '/video/' + slide.split('.')[0] + '.mp4'
-        
-
-        # escape the spaces in the path
-        slide_path = slide_path.replace(' ', '\\ ')
-        audio_path = audio_path.replace(' ', '\\ ')
-        video_path = video_path.replace(' ', '\\ ')
-
-        video_files.append(video_path)
+    list_path = os.path.join(VIDEO_DIR, 'video_list.txt')
+    with open(list_path, 'w') as f:
+        for clip in clips:
+            f.write("file '" + clip.replace("'", "'\\''") + "'\n")
+    ffmpeg('-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy',
+           PRESENTATION_PATH)
 
 
-        command = f'ffmpeg -loop 1 -i {slide_path} -i {audio_path} -shortest {video_path}'
+def write_timings(slides_JSON, durations):
+    """Slide start/end times (seconds) within presentation.mp4."""
+    t, timings = 0.0, []
+    for slide in slides_JSON['slides']:
+        d = durations.get(slide['slide'], 0.0)
+        timings.append({
+            'slide': slide['slide'],
+            'image': f"slide_{slide['slide']}.png",
+            'title': slide['title'],
+            'line': slide['line'],
+            'start': round(t, 3),
+            'end': round(t + d, 3),
+        })
+        t += d
+    with open(TIMINGS_PATH, 'w') as f:
+        json.dump({'slides': timings}, f, indent=2)
 
-        os.system(command)
 
-    # create a list of videos to merge
-    video_list = ''
-    for video in video_files:
-        video_list += 'file ' + video + '\n'
+def prepare_dirs():
+    """Remove artifacts from previous runs so they never leak into this one."""
+    for d in (AUDIO_DIR, SLIDE_DIR, VIDEO_DIR):
+        shutil.rmtree(d, ignore_errors=True)
+    for p in (PRESENTATION_PATH, TIMINGS_PATH):
+        if os.path.exists(p):
+            os.remove(p)
+    for d in (AUDIO_DIR, MERGED_DIR, SLIDE_DIR, VIDEO_DIR):
+        os.makedirs(d, exist_ok=True)
 
-    with open(os.getcwd() + '/video/'+'video_list.txt', 'w') as file:
-        file.write(video_list)
-    
-    video_list_path = os.getcwd() + '/video/'+'video_list.txt'
-    final_video_path = os.getcwd() + '/presentation.mp4'
-    
-    video_list_path = video_list_path.replace(' ', '\\ ')
-    final_video_path = final_video_path.replace(' ', '\\ ')
 
-    command = f'ffmpeg -f concat -safe 0 -i {video_list_path} -c copy {final_video_path}'
-    os.system(command)
-
-def reset():
+def cleanup():
     print('Cleaning up...')
-    # Allow preserving artifacts for downstream pipelines via env vars
     keep_slides = os.getenv('KEEP_SLIDES', '0') == '1'
-
-    # remove the audio files (except merged/, handled below)
-    audio_root = os.path.join(os.getcwd(), AUDIO_PATH.strip('/')) + '/'
-    if os.path.exists(audio_root):
-        audio_files = os.listdir(audio_root)
-        for file in audio_files:
-            path = os.path.join(audio_root, file)
-            if not os.path.isdir(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-
-    # optionally remove the slides
-    slides_root = os.path.join(os.getcwd(), SLIDE_PATH.strip('/')) + '/'
-    if not keep_slides and os.path.exists(slides_root):
-        slide_files = os.listdir(slides_root)
-        for file in slide_files:
-            try:
-                os.remove(os.path.join(slides_root, file))
-            except Exception:
-                pass
-
-    # remove the merged audio files and directory
-    merged_root = os.path.join(audio_root, 'merged')
-    if os.path.exists(merged_root):
-        try:
-            merged_files = os.listdir(merged_root)
-            for file in merged_files:
-                try:
-                    os.remove(os.path.join(merged_root, file))
-                except Exception:
-                    pass
-            os.rmdir(merged_root)
-        except Exception:
-            pass
-
-    # remove the per-slide video files
-    video_root = os.path.join(os.getcwd(), 'video')
-    if os.path.exists(video_root):
-        try:
-            video_files = os.listdir(video_root)
-            for file in video_files:
-                try:
-                    os.remove(os.path.join(video_root, file))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    print(f"Cleanup complete. Slides preserved: {keep_slides}")
+    shutil.rmtree(AUDIO_DIR, ignore_errors=True)
+    shutil.rmtree(VIDEO_DIR, ignore_errors=True)
+    if not keep_slides:
+        shutil.rmtree(SLIDE_DIR, ignore_errors=True)
+    print(f'Cleanup complete. Slides preserved: {keep_slides}')
 
 
 def main():
-    print('starting')
+    import argparse
+    ap = argparse.ArgumentParser(description='Generate a narrated slide deck')
+    ap.add_argument('topic')
+    ap.add_argument('--details', default='',
+                    help='What the presentation should specifically cover')
+    ap.add_argument('--minutes', type=float, default=3.0,
+                    help='Target narration length in minutes (default 3)')
+    ap.add_argument('--voice', default='female',
+                    help='Narrator voice: a name from voices/*.npy '
+                         '(female, male)')
+    args = ap.parse_args()
+    if args.voice not in available_voices():
+        sys.exit(f'Unknown voice {args.voice!r}; choose from '
+                 f'{", ".join(available_voices())}')
+    if not 0.5 <= args.minutes <= 15:
+        sys.exit('--minutes must be between 0.5 and 15')
+    load_api_key()  # fail fast before loading any models
+    prepare_dirs()
 
-    print(f'Generating transcript for presentation about {topic}...')
-
-    transcript = generate_transcript(topic)
-
-    slides_JSON = get_JSON_from_transcript(transcript)
+    print(f'Generating script for a presentation about {args.topic}...')
+    slides_JSON = generate_slides_json(args.topic, args.details, args.minutes,
+                                       args.voice)
 
     generate_slides(slides_JSON)
-    covert_trascript_to_audio(slides_JSON)
-
-    merge_audio_files()
-
-    generate_video()
-
-    reset()
-
+    convert_transcript_to_audio(slides_JSON, args.voice)
+    durations = merge_audio_files()
+    generate_video(slides_JSON, durations)
+    write_timings(slides_JSON, durations)
+    cleanup()
     print('All done! Presentation video has been generated')
-    exit(0)
 
 
 if __name__ == '__main__':
