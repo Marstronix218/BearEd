@@ -4,7 +4,8 @@ Generate an AI-presented slide deck (text-to-speech + auto slides), lip-sync tha
 
 ## Demo
 
-https://github.com/user-attachments/assets/06e9f5ff-e452-497d-81df-0482c0e39932 
+https://github.com/user-attachments/assets/cdc64c60-b2e6-483d-a4a5-f6591fa63e10
+ 
 
 ## What's inside
 
